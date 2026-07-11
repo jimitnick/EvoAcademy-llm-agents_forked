@@ -17,6 +17,32 @@ _MAX_RETRIES = 4
 _RETRY_BASE_DELAY = 2.0
 
 
+class PromptValidation(BaseModel):
+    is_valid_ea: bool = Field(description="True if the prompt is about Evolutionary Algorithms, Genetic Algorithms, or optimization problems. False otherwise.")
+    reason: str = Field(description="If false, a brief polite message explaining that this platform is only for Evolutionary algorithm problems.")
+
+
+def prompt_guardrail_node(state: NotebookState):
+    print(f"--> [Gatekeeper] Inspecting prompt : '{state['user_prompt']}'")
+    validator = coder_llm.with_structured_output(PromptValidation)
+
+    system_prompt = f"""
+    You are the domain gatekeeper for an educational platform teaching Evolutionary Algorithms (DEAP).
+    Evaluate this user prompt : "{state['user_prompt']}"
+    If the prompt is about optimization, genetic algorithms, traveling salesman, knapsack, evolutionary strategies, or math, return True.
+    If the prompt is about general software engineering(e.g., Todo lists, web apps,databases, games),return False.
+    """
+
+    decision = validator.invoke(system_prompt)
+    if not decision.is_valid_ea:
+        print(f" --> [Gatekeeper] REJECTED : {decision.reason}")
+
+    return {
+        "is_valid_ea_prompt": decision.is_valid_ea,
+        "rejection_reason": decision.reason
+    }
+
+
 # Structured schema mapping the 12 DEAP cells
 class Subtasks(BaseModel):
     target_problem: str = Field(description="The formal name of the problem")

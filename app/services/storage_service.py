@@ -82,7 +82,45 @@ class StorageService:
         rel_path = os.path.relpath(abs_path, start=os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
         logger.info(f"[Storage] Saved {rel_path} (checksum={checksum[:12]}...)")
+        
+        # Keep the active working document up to date
+        self.update_active_notebook(session_id, cells)
+
         return rel_path, checksum
+
+    def update_active_notebook(self, session_id: str, cells: Dict[str, str]) -> str:
+        """
+        Updates the main 'active.ipynb' file for the session with the given cells.
+        This file acts as the user's live working document (refreshable in Jupyter/editors).
+        """
+        session_dir = os.path.join(STORAGE_ROOT, f"session_{session_id}")
+        os.makedirs(session_dir, exist_ok=True)
+        abs_path = os.path.join(session_dir, "active.ipynb")
+
+        nb = new_notebook()
+        ordered_cells = []
+        for cell_name in DEAP_CELLS:
+            code = cells.get(cell_name, "")
+            if code:
+                code_cell = new_code_cell(source=code)
+                code_cell.metadata["cell_name"] = cell_name
+                ordered_cells.append(code_cell)
+        for cell_name, code in cells.items():
+            if cell_name not in DEAP_CELLS and code:
+                code_cell = new_code_cell(source=code)
+                code_cell.metadata["cell_name"] = cell_name
+                ordered_cells.append(code_cell)
+
+        nb.cells = ordered_cells
+        nb.metadata["session_id"] = session_id
+
+        with open(abs_path, "w", encoding="utf-8") as f:
+            nbformat.write(nb, f)
+
+        rel_path = os.path.relpath(abs_path, start=os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        logger.info(f"[Storage] Updated active working file: {rel_path}")
+        return rel_path
+
 
     def load_notebook(self, file_path: str) -> Dict[str, str]:
         """

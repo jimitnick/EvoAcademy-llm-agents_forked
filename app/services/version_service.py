@@ -19,6 +19,7 @@ Rollback is metadata-only: only active_version_id changes, no files touched.
 import ast
 import logging
 from typing import Dict, List, Optional, Tuple
+import os
 
 from sqlalchemy.orm import Session as DBSession
 
@@ -153,16 +154,21 @@ class VersionService:
         Runs the refine workflow. Never overwrites previous version.
         Falls back to current active version on any failure.
         """
+        # Load the full notebook cells from the active version on disk
+        db_cells = self.get_active_cells(session_id) or {}
+        # Merge client's current_cells over disk cells to preserve all 12 cells
+        merged_cells = {**db_cells, **current_cells}
+
         preferences = memory_service.get_preferences(session_id)
         enriched_prompt = f"{user_prompt}\n\n{preferences}" if preferences else user_prompt
 
         result_state = await refine_graph.ainvoke({
             "user_prompt": enriched_prompt,
             "session_id": session_id,
-            "notebook_cells": current_cells,
+            "notebook_cells": merged_cells,
         })
 
-        refined_cells = result_state.get("notebook_cells", current_cells)
+        refined_cells = result_state.get("notebook_cells", merged_cells)
         cells_modified = result_state.get("cells_to_modify", [])
         explanation = result_state.get("educational_response") or result_state.get("tutor_explanation") or ""
 
@@ -202,6 +208,11 @@ class VersionService:
         Runs the refine workflow in debug mode (auto-fix the traceback).
         Same versioning lifecycle as refine.
         """
+        # Load the full notebook cells from the active version on disk
+        db_cells = self.get_active_cells(session_id) or {}
+        # Merge client's current_cells over disk cells to preserve all 12 cells
+        merged_cells = {**db_cells, **current_cells}
+
         debug_prompt = f"DEBUG: Fix this runtime error:\n{traceback_msg}"
         preferences = memory_service.get_preferences(session_id)
         enriched_prompt = f"{debug_prompt}\n\n{preferences}" if preferences else debug_prompt
@@ -209,12 +220,12 @@ class VersionService:
         result_state = await refine_graph.ainvoke({
             "user_prompt": enriched_prompt,
             "session_id": session_id,
-            "notebook_cells": current_cells,
+            "notebook_cells": merged_cells,
             "is_traceback_error": True,
             "traceback_msg": traceback_msg,
         })
 
-        fixed_cells = result_state.get("notebook_cells", current_cells)
+        fixed_cells = result_state.get("notebook_cells", merged_cells)
         cells_modified = result_state.get("cells_to_modify", [])
         explanation = result_state.get("educational_response") or result_state.get("tutor_explanation") or ""
 
@@ -268,6 +279,10 @@ class VersionService:
 
         # Load cells from immutable file
         cells = storage_service.load_notebook(target.file_path)
+
+        # Update the live active working notebook for the user's workspace
+        storage_service.update_active_notebook(session_id, cells)
+
         return {
             "status": "success",
             "cells": cells,
@@ -297,14 +312,36 @@ class VersionService:
         }
 
     def get_active_cells(self, session_id: str) -> Optional[Dict[str, str]]:
-        """Loads cells from the currently active .ipynb file."""
+        """Loads cells from the currently active .ipynb file, with disk fallback."""
         notebook = self.notebook_repo.get_notebook_by_session(session_id)
-        if not notebook or not notebook.active_version_id:
-            return None
-        active = self.version_repo.get_version_by_id(notebook.active_version_id)
-        if not active:
-            return None
-        return storage_service.load_notebook(active.file_path)
+        if notebook and notebook.active_version_id:
+            active = self.version_repo.get_version_by_id(notebook.active_version_id)
+            if active:
+                try:
+                    return storage_service.load_notebook(active.file_path)
+                except Exception as e:
+                    logger.warning(f"Failed to load active notebook file: {e}")
+
+        # Fallback: if DB lookup fails or is out of sync, scan disk for latest version
+        try:
+            from app.services.storage_service import STORAGE_ROOT
+            session_dir = os.path.join(STORAGE_ROOT, f"session_{session_id}")
+            if os.path.exists(session_dir):
+                files = [f for f in os.listdir(session_dir) if f.startswith("version_") and f.endswith(".ipynb")]
+                if files:
+                    def get_ver_num(filename):
+                        try:
+                            return int(filename.split("_")[1].split(".")[0])
+                        except Exception:
+                            return 0
+                    files.sort(key=get_ver_num, reverse=True)
+                    latest_file = os.path.join(session_dir, files[0])
+                    logger.info(f"[VersionService] DB out of sync, loaded fallback active cells from: {latest_file}")
+                    return storage_service.load_notebook(latest_file)
+        except Exception as e:
+            logger.warning(f"Disk fallback for active cells failed: {e}")
+
+        return None
 
     def semantic_search(self, session_id: str, query: str, n_results: int = 5) -> dict:
         """Natural language search over version summaries via ChromaDB."""
