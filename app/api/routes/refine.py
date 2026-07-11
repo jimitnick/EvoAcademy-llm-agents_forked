@@ -44,4 +44,27 @@ async def refine_notebook(request: RefineRequest, db: Session = Depends(get_db))
         return RefineResponse(**result)
     except Exception as e:
         logger.exception(f"[/refine] Failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            svc = VersionService(db)
+            active_cells = svc.get_active_cells(request.session_id) or {}
+            
+            notebook = svc.notebook_repo.get_notebook_by_session(request.session_id)
+            active_ver_num = 1
+            active_ver_id = ""
+            if notebook and notebook.active_version_id:
+                active_ver = svc.version_repo.get_version_by_id(notebook.active_version_id)
+                if active_ver:
+                    active_ver_num = active_ver.version_number
+                    active_ver_id = active_ver.version_id
+
+            return RefineResponse(
+                status="reverted",
+                cells=active_cells,
+                cells_modified=[],
+                tutor_explanation=f"Refinement pipeline error: {str(e)}. Automatically rolled back to the previous working version.",
+                version_number=active_ver_num,
+                version_id=active_ver_id,
+            )
+        except Exception as fallback_err:
+            logger.exception(f"[/refine] Rollback fallback failed: {fallback_err}")
+            raise HTTPException(status_code=500, detail=str(e))

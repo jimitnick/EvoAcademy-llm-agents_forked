@@ -1,97 +1,98 @@
 import unittest
 from unittest.mock import AsyncMock, patch
-import json
 import os
 import shutil
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-from app.main import app, validate_cells, compile_cells
-from app.core import version_store
+from app.main import app
+from app.db.database import Base, get_db
+from app.db.models import Notebook, NotebookVersion
+from app.services.version_service import VersionService
+from app.services.storage_service import STORAGE_ROOT
+
+# Use file-based SQLite database for testing so all connections share the same tables/data
+DB_FILE = "./test_version_history.db"
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_FILE}"
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def override_get_db():
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+app.dependency_overrides[get_db] = override_get_db
+
 
 class TestVersionControl(unittest.TestCase):
     def setUp(self):
-        # Configure a test database file
-        self.test_db_path = os.path.join(os.path.dirname(__file__), "test_version_history.db")
-        version_store.DB_PATH = self.test_db_path
-        # Force re-initialization of db in the test path
-        version_store.init_db()
+        # Create all tables in the test database
+        Base.metadata.create_all(bind=engine)
         self.client = TestClient(app)
         self.session_id = "test_session_123"
+        self.db = TestingSessionLocal()
 
     def tearDown(self):
-        # Clean up the test database file
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
-
-    def test_database_operations(self):
-        """Test basic SQLite version store API operations directly."""
-        cells = {"imports": "import deap", "config": "rate = 0.5"}
+        # Close and clear database
+        self.db.close()
+        engine.dispose()  # Releases the file locks on test_version_history.db
         
-        # Test saving a version
-        v1 = version_store.save_version(
-            session_id=self.session_id,
-            user_intent="Initial setup",
-            cells=cells,
-            compiled_script="script_v1",
-            status="working"
-        )
-        self.assertEqual(v1["version_number"], 1)
-        self.assertEqual(v1["status"], "working")
-        self.assertEqual(v1["cells"], cells)
+        if os.path.exists(DB_FILE):
+            try:
+                os.remove(DB_FILE)
+            except Exception as e:
+                print(f"Warning: Failed to remove test DB file: {e}")
 
-        # Test next version number increment
-        next_ver = version_store.get_next_version_number(self.session_id)
-        self.assertEqual(next_ver, 2)
+        # Clean up files created in STORAGE_ROOT for the test session
+        test_session_dir = os.path.join(STORAGE_ROOT, f"session_{self.session_id}")
+        if os.path.exists(test_session_dir):
+            try:
+                shutil.rmtree(test_session_dir)
+            except Exception:
+                pass
 
-        # Test latest working version retrieval
-        latest = version_store.get_latest_working_version(self.session_id)
-        self.assertIsNotNone(latest)
-        self.assertEqual(latest["version_number"], 1)
+    def get_history(self) -> list:
+        """Helper to fetch history from VersionService."""
+        svc = VersionService(self.db)
+        history_dict = svc.get_history(self.session_id)
+        return history_dict.get("versions", [])
 
-        # Test saving a second version (failed)
-        cells_v2 = {"imports": "import deap", "config": "rate = 0.6 ("}
-        v2 = version_store.save_version(
-            session_id=self.session_id,
-            user_intent="Modify config with error",
-            cells=cells_v2,
-            compiled_script="script_v2",
-            status="failed",
-            error_message="SyntaxError"
-        )
-        self.assertEqual(v2["version_number"], 2)
-        self.assertEqual(v2["status"], "failed")
-
-        # Latest working version should still be version 1
-        latest = version_store.get_latest_working_version(self.session_id)
-        self.assertEqual(latest["version_number"], 1)
-
-        # Test rollback to version 1
-        v3 = version_store.rollback_to_version(self.session_id, 1)
-        self.assertEqual(v3["version_number"], 3)
-        self.assertEqual(v3["status"], "working")
-        self.assertEqual(v3["cells"], cells)
-
-        # Session history should contain 3 entries
-        history = version_store.get_session_history(self.session_id)
-        self.assertEqual(len(history), 3)
-        self.assertEqual(history[0]["version_number"], 1)
-        self.assertEqual(history[1]["version_number"], 2)
-        self.assertEqual(history[2]["version_number"], 3)
-
-    @patch("app.main.generate_graph.ainvoke", new_callable=AsyncMock)
+    @patch("app.services.version_service.generate_graph.ainvoke", new_callable=AsyncMock)
     def test_generate_endpoint(self, mock_generate_ainvoke):
         """Test that /generate deletes old session data and stores Version 1."""
-        # 1. Insert dummy version first to check deletion
-        version_store.save_version(
-            session_id=self.session_id,
-            user_intent="Dummy version to delete",
-            cells={"imports": "import sys"},
-            compiled_script="script",
-            status="working"
-        )
+        # 1. Insert dummy version/notebook first to check deletion
+        svc = VersionService(self.db)
+        from app.db.repositories.notebook_repo import NotebookRepository
+        from app.db.repositories.version_repo import VersionRepository
+        notebook_repo = NotebookRepository(self.db)
+        version_repo = VersionRepository(self.db)
         
+        notebook = notebook_repo.get_or_create_notebook(self.session_id)
+        version_repo.create_version(
+            notebook_id=notebook.notebook_id,
+            version_number=1,
+            operation_type="generate",
+            file_path="dummy_path.ipynb",
+            checksum="dummy_checksum",
+            prompt="Dummy",
+            summary="Dummy version to delete"
+        )
+        self.db.commit()
+        
+        # Verify dummy exists
+        history = self.get_history()
+        self.assertEqual(len(history), 1)
+
         # 2. Mock graph invocation
         mock_generate_ainvoke.return_value = {
+            "is_valid_ea_prompt": True,
             "target_problem": "OneMax",
             "notebook_cells": {"imports": "import deap", "config": "rate = 0.5"},
             "compiled_script": "compiled_onemax"
@@ -109,25 +110,60 @@ class TestVersionControl(unittest.TestCase):
         self.assertEqual(data["cells"]["imports"], "import deap")
 
         # 4. Check DB status: old history deleted, only new Version 1 exists
-        history = version_store.get_session_history(self.session_id)
+        self.db.expire_all()
+        history = self.get_history()
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["version_number"], 1)
-        self.assertEqual(history[0]["user_intent"], "Initial generation: Solve OneMax")
-        self.assertEqual(history[0]["status"], "working")
+        self.assertEqual(history[0]["prompt"], "Solve OneMax")
+        self.assertEqual(history[0]["operation_type"], "generate")
 
-    @patch("app.main.refine_graph.ainvoke", new_callable=AsyncMock)
+    @patch("app.services.version_service.generate_graph.ainvoke", new_callable=AsyncMock)
+    def test_generate_endpoint_rejected(self, mock_generate_ainvoke):
+        """Test that /generate returns status='rejected' when rejected by the gatekeeper."""
+        # 1. Mock graph invocation with rejection
+        mock_generate_ainvoke.return_value = {
+            "is_valid_ea_prompt": False,
+            "rejection_reason": "This platform is only for Evolutionary algorithm problems."
+        }
+
+        # 2. Call endpoint
+        response = self.client.post(
+            "/generate",
+            json={"session_id": self.session_id, "prompt": "Build a React todo app"}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "rejected")
+        self.assertEqual(data["target_problem"], "Invalid Domain")
+        self.assertEqual(data["cells"], {})
+        self.assertEqual(data["compiled_script"], "# ERROR:This platform is only for Evolutionary algorithm problems.")
+        self.assertEqual(data["version_number"], 0)
+        self.assertEqual(data["version_id"], "")
+
+        # 3. Verify no versions created in DB
+        self.db.expire_all()
+        history = self.get_history()
+        self.assertEqual(len(history), 0)
+
+    @patch("app.services.version_service.refine_graph.ainvoke", new_callable=AsyncMock)
     def test_refine_endpoint_success(self, mock_refine_ainvoke):
         """Test successful /refine saves a new working version."""
-        # 1. Save Version 1 baseline
-        version_store.save_version(
-            session_id=self.session_id,
-            user_intent="Baseline",
-            cells={"imports": "import deap", "config": "rate = 0.5"},
-            compiled_script="script_v1",
-            status="working"
+        # 1. Create baseline version 1 using VersionService directly
+        svc = VersionService(self.db)
+        notebook = svc.notebook_repo.get_or_create_notebook(self.session_id)
+        v1 = svc.version_repo.create_version(
+            notebook_id=notebook.notebook_id,
+            version_number=1,
+            operation_type="generate",
+            file_path="dummy_path.ipynb",
+            checksum="dummy_checksum",
+            prompt="Solve OneMax",
+            summary="Baseline"
         )
+        svc.notebook_repo.set_active_version(notebook.notebook_id, v1.version_id)
+        self.db.commit()
 
-        # 2. Mock success response
+        # 2. Mock success response from refinement LLM
         mock_refine_ainvoke.return_value = {
             "notebook_cells": {"imports": "import deap", "config": "rate = 0.7"},
             "cells_to_modify": ["config"],
@@ -149,26 +185,36 @@ class TestVersionControl(unittest.TestCase):
         self.assertEqual(data["status"], "success")
         self.assertEqual(data["cells"]["config"], "rate = 0.7")
 
-        # 4. Check DB: Version 2 should be 'working'
-        history = version_store.get_session_history(self.session_id)
+        # 4. Check DB: Version 2 should exist and be active
+        self.db.expire_all()
+        history = self.get_history()
         self.assertEqual(len(history), 2)
         self.assertEqual(history[1]["version_number"], 2)
-        self.assertEqual(history[1]["status"], "working")
-        self.assertEqual(history[1]["user_intent"], "Increase rate to 0.7")
+        self.assertEqual(history[1]["operation_type"], "refine")
 
-    @patch("app.main.refine_graph.ainvoke", new_callable=AsyncMock)
-    def test_refine_endpoint_syntax_error_rollback(self, mock_refine_ainvoke):
-        """Test that /refine with syntax error automatically rolls back to Version 1."""
-        # 1. Save Version 1 baseline
-        version_store.save_version(
-            session_id=self.session_id,
-            user_intent="Baseline",
-            cells={"imports": "import deap", "config": "rate = 0.5"},
-            compiled_script="script_v1",
-            status="working"
+    @patch("app.services.version_service.storage_service.load_notebook")
+    @patch("app.services.version_service.refine_graph.ainvoke", new_callable=AsyncMock)
+    def test_refine_endpoint_syntax_error(self, mock_refine_ainvoke, mock_load_notebook):
+        """Test that /refine with syntax error automatically reverts and returns 200."""
+        # 1. Create baseline version 1
+        svc = VersionService(self.db)
+        notebook = svc.notebook_repo.get_or_create_notebook(self.session_id)
+        v1 = svc.version_repo.create_version(
+            notebook_id=notebook.notebook_id,
+            version_number=1,
+            operation_type="generate",
+            file_path="dummy_path.ipynb",
+            checksum="dummy_checksum",
+            prompt="Solve OneMax",
+            summary="Baseline"
         )
+        svc.notebook_repo.set_active_version(notebook.notebook_id, v1.version_id)
+        self.db.commit()
 
-        # 2. Mock syntax error response
+        # Mock disk load to return the active cells
+        mock_load_notebook.return_value = {"imports": "import deap", "config": "rate = 0.5"}
+
+        # 2. Mock syntax error response (invalid Python syntax)
         mock_refine_ainvoke.return_value = {
             "notebook_cells": {"imports": "import deap", "config": "rate = 0.7 ("}, # invalid
             "cells_to_modify": ["config"],
@@ -187,31 +233,36 @@ class TestVersionControl(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        # Should be reverted
         self.assertEqual(data["status"], "reverted")
-        self.assertEqual(data["cells"]["config"], "rate = 0.5") # Reverted cells returned
-        self.assertTrue("rolled back" in data["tutor_explanation"])
+        self.assertEqual(data["cells"]["config"], "rate = 0.5") # Reverted
+        self.assertEqual(data["version_number"], 1)
+        self.assertEqual(data["version_id"], v1.version_id)
+        
+        # 4. Check DB: Should still only have Version 1
+        self.db.expire_all()
+        history = self.get_history()
+        self.assertEqual(len(history), 1)
 
-        # 4. Check DB: Should have Version 2 (failed) and Version 3 (revert working)
-        history = version_store.get_session_history(self.session_id)
-        self.assertEqual(len(history), 3)
-        self.assertEqual(history[1]["version_number"], 2)
-        self.assertEqual(history[1]["status"], "failed")
-        self.assertEqual(history[2]["version_number"], 3)
-        self.assertEqual(history[2]["status"], "working")
-        self.assertTrue("Auto-rollback" in history[2]["user_intent"])
-
-    @patch("app.main.refine_graph.ainvoke", new_callable=AsyncMock)
-    def test_refine_endpoint_pipeline_failure_rollback(self, mock_refine_ainvoke):
-        """Test that /refine with pipeline exception automatically rolls back to Version 1."""
-        # 1. Save Version 1 baseline
-        version_store.save_version(
-            session_id=self.session_id,
-            user_intent="Baseline",
-            cells={"imports": "import deap", "config": "rate = 0.5"},
-            compiled_script="script_v1",
-            status="working"
+    @patch("app.services.version_service.storage_service.load_notebook")
+    @patch("app.services.version_service.refine_graph.ainvoke", new_callable=AsyncMock)
+    def test_refine_endpoint_pipeline_failure(self, mock_refine_ainvoke, mock_load_notebook):
+        """Test that /refine with pipeline exception automatically reverts and returns 200."""
+        # 1. Create baseline version 1
+        svc = VersionService(self.db)
+        notebook = svc.notebook_repo.get_or_create_notebook(self.session_id)
+        v1 = svc.version_repo.create_version(
+            notebook_id=notebook.notebook_id,
+            version_number=1,
+            operation_type="generate",
+            file_path="dummy_path.ipynb",
+            checksum="dummy_checksum",
+            prompt="Solve OneMax",
+            summary="Baseline"
         )
+        svc.notebook_repo.set_active_version(notebook.notebook_id, v1.version_id)
+        self.db.commit()
+
+        mock_load_notebook.return_value = {"imports": "import deap", "config": "rate = 0.5"}
 
         # 2. Mock pipeline throwing exception
         mock_refine_ainvoke.side_effect = Exception("LLM connection timed out")
@@ -229,25 +280,26 @@ class TestVersionControl(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["status"], "reverted")
         self.assertEqual(data["cells"]["config"], "rate = 0.5")
-        self.assertTrue("Pipeline error" in data["tutor_explanation"])
 
-        # 4. Check DB: Version 2 is 'failed'
-        history = version_store.get_session_history(self.session_id)
-        self.assertEqual(history[1]["version_number"], 2)
-        self.assertEqual(history[1]["status"], "failed")
-        self.assertEqual(history[1]["error_message"], "LLM connection timed out")
-
-    @patch("app.main.refine_graph.ainvoke", new_callable=AsyncMock)
+    @patch("app.services.version_service.refine_graph.ainvoke", new_callable=AsyncMock)
     def test_debug_endpoint_success(self, mock_refine_ainvoke):
         """Test successful /debug saves a new working version."""
-        version_store.save_version(
-            session_id=self.session_id,
-            user_intent="Baseline",
-            cells={"imports": "import deap", "config": "rate = 0.5"},
-            compiled_script="script_v1",
-            status="working"
+        # 1. Create baseline version 1
+        svc = VersionService(self.db)
+        notebook = svc.notebook_repo.get_or_create_notebook(self.session_id)
+        v1 = svc.version_repo.create_version(
+            notebook_id=notebook.notebook_id,
+            version_number=1,
+            operation_type="generate",
+            file_path="dummy_path.ipynb",
+            checksum="dummy_checksum",
+            prompt="Solve OneMax",
+            summary="Baseline"
         )
+        svc.notebook_repo.set_active_version(notebook.notebook_id, v1.version_id)
+        self.db.commit()
 
+        # 2. Mock debug success response
         mock_refine_ainvoke.return_value = {
             "notebook_cells": {"imports": "import deap", "config": "rate = 0.6"},
             "cells_to_modify": ["config"]
@@ -265,62 +317,150 @@ class TestVersionControl(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["status"], "success")
 
-        history = version_store.get_session_history(self.session_id)
+        self.db.expire_all()
+        history = self.get_history()
         self.assertEqual(len(history), 2)
         self.assertEqual(history[1]["version_number"], 2)
-        self.assertEqual(history[1]["status"], "working")
-        self.assertTrue("Debug traceback" in history[1]["user_intent"])
+        self.assertEqual(history[1]["operation_type"], "debug")
 
-    def test_manual_rollback_endpoint(self):
-        """Test manual rollback endpoint."""
-        version_store.save_version(
-            session_id=self.session_id,
-            user_intent="V1",
-            cells={"imports": "import deap", "config": "rate = 0.5"},
-            compiled_script="script_v1",
-            status="working"
+    @patch("app.services.version_service.storage_service.load_notebook")
+    @patch("app.services.version_service.refine_graph.ainvoke", new_callable=AsyncMock)
+    def test_debug_endpoint_failure_revert(self, mock_refine_ainvoke, mock_load_notebook):
+        """Test that /debug with validation failure automatically reverts and returns 200."""
+        # 1. Create baseline version 1
+        svc = VersionService(self.db)
+        notebook = svc.notebook_repo.get_or_create_notebook(self.session_id)
+        v1 = svc.version_repo.create_version(
+            notebook_id=notebook.notebook_id,
+            version_number=1,
+            operation_type="generate",
+            file_path="dummy_path.ipynb",
+            checksum="dummy_checksum",
+            prompt="Solve OneMax",
+            summary="Baseline"
         )
-        version_store.save_version(
-            session_id=self.session_id,
-            user_intent="V2",
-            cells={"imports": "import deap", "config": "rate = 0.8"},
-            compiled_script="script_v2",
-            status="working"
-        )
+        svc.notebook_repo.set_active_version(notebook.notebook_id, v1.version_id)
+        self.db.commit()
 
-        # Call rollback to Version 1
+        mock_load_notebook.return_value = {"imports": "import deap", "config": "rate = 0.5"}
+
+        # 2. Mock debug validation failure (invalid Python syntax)
+        mock_refine_ainvoke.return_value = {
+            "notebook_cells": {"imports": "import deap", "config": "rate = 0.6 ("}, # invalid
+            "cells_to_modify": ["config"]
+        }
+
         response = self.client.post(
-            f"/sessions/{self.session_id}/rollback",
-            json={"version_number": 1}
+            "/debug",
+            json={
+                "session_id": self.session_id,
+                "traceback_msg": "NameError: name 'rate' is not defined",
+                "current_cells": {"imports": "import deap", "config": "rate = 0.5"}
+            }
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["status"], "success")
+        self.assertEqual(data["status"], "reverted")
         self.assertEqual(data["cells"]["config"], "rate = 0.5")
+        self.assertEqual(data["version_number"], 1)
 
-        # Database should have Version 3 which is a rollback to 1
-        history = version_store.get_session_history(self.session_id)
-        self.assertEqual(len(history), 3)
-        self.assertEqual(history[2]["version_number"], 3)
-        self.assertEqual(history[2]["status"], "working")
-        self.assertEqual(history[2]["user_intent"], "Manual rollback to version 1")
+    def test_manual_rollback_endpoint(self):
+        """Test manual rollback endpoint."""
+        svc = VersionService(self.db)
+        notebook = svc.notebook_repo.get_or_create_notebook(self.session_id)
+        
+        with patch("app.services.version_service.storage_service.load_notebook") as mock_load:
+            mock_load.return_value = {"imports": "import deap", "config": "rate = 0.5"}
+            
+            v1 = svc.version_repo.create_version(
+                notebook_id=notebook.notebook_id,
+                version_number=1,
+                operation_type="generate",
+                file_path="dummy_v1.ipynb",
+                checksum="checksum1",
+                prompt="V1",
+                summary="V1 summary"
+            )
+            v2 = svc.version_repo.create_version(
+                notebook_id=notebook.notebook_id,
+                version_number=2,
+                operation_type="refine",
+                file_path="dummy_v2.ipynb",
+                checksum="checksum2",
+                prompt="V2",
+                summary="V2 summary"
+            )
+            svc.notebook_repo.set_active_version(notebook.notebook_id, v2.version_id)
+            self.db.commit()
+
+            # Call rollback to Version 1
+            response = self.client.post(
+                f"/sessions/{self.session_id}/rollback",
+                json={"version_number": 1}
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["status"], "success")
+            self.assertEqual(data["version_number"], 1)
+
+            # Database should point to active version 1
+            self.db.expire_all()
+            notebook = svc.notebook_repo.get_notebook_by_session(self.session_id)
+            self.assertEqual(notebook.active_version_id, v1.version_id)
 
     def test_get_history_endpoint(self):
         """Test fetching session history via GET endpoint."""
-        version_store.save_version(
-            session_id=self.session_id,
-            user_intent="V1",
-            cells={"imports": "import deap"},
-            compiled_script="",
-            status="working"
+        svc = VersionService(self.db)
+        notebook = svc.notebook_repo.get_or_create_notebook(self.session_id)
+        
+        v1 = svc.version_repo.create_version(
+            notebook_id=notebook.notebook_id,
+            version_number=1,
+            operation_type="generate",
+            file_path="dummy.ipynb",
+            checksum="hash",
+            prompt="V1",
+            summary="Initial version"
         )
+        svc.notebook_repo.set_active_version(notebook.notebook_id, v1.version_id)
+        self.db.commit()
         
         response = self.client.get(f"/sessions/{self.session_id}/history")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["session_id"], self.session_id)
-        self.assertEqual(len(data["history"]), 1)
-        self.assertEqual(data["history"][0]["user_intent"], "V1")
+        self.assertEqual(len(data["versions"]), 1)
+        self.assertEqual(data["versions"][0]["prompt"], "V1")
+
+    def test_health_check_endpoint(self):
+        """Test the health check endpoint."""
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+
+    @patch("app.services.version_service.chroma_service.semantic_search")
+    def test_search_versions_endpoint(self, mock_chroma_search):
+        """Test semantic search endpoint."""
+        mock_chroma_search.return_value = [
+            {
+                "version_id": "v1-id",
+                "version_number": 1,
+                "summary": "Initial version",
+                "operation_type": "generate",
+                "cells_modified": ["all cells"],
+                "relevance_score": 0.95
+            }
+        ]
+
+        response = self.client.get(f"/sessions/{self.session_id}/search?q=initial")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["session_id"], self.session_id)
+        self.assertEqual(data["query"], "initial")
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["version_number"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

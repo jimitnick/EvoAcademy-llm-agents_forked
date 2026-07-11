@@ -109,6 +109,19 @@ class VersionService:
             "user_prompt": enriched_prompt,
             "session_id": session_id,
         })
+        
+        # Check if prompt was rejected by gatekeeper
+        if not result_state.get("is_valid_ea_prompt", True):
+            reason = result_state.get("rejection_reason", "Prompt is not related to Evolutionary Algorithms.")
+            return {
+                "status": "rejected",
+                "target_problem": "Invalid Domain",
+                "cells": {},
+                "compiled_script": f"# ERROR:{reason}",
+                "version_number": 0,
+                "version_id": "",
+            }
+
         generated_cells = result_state.get("notebook_cells", {})
         cells = {k: generated_cells.get(k, "") for k in DEAP_CELLS}
         target_problem = result_state.get("target_problem", prompt)

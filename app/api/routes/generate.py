@@ -38,6 +38,9 @@ async def generate_notebook(request: GenerateRequest, db: Session = Depends(get_
         svc = VersionService(db)
         result = await svc.generate(session_id=request.session_id, prompt=request.prompt)
         return GenerateResponse(**result)
+    except ValueError as e:
+        logger.warning(f"[/generate] Validation failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception(f"[/generate] Failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
