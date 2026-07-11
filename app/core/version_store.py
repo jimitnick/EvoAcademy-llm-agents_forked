@@ -3,6 +3,7 @@ import json
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
+from app.core import chroma_store
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "version_history.db")
 
@@ -53,11 +54,12 @@ def save_version(
     status: str,
     error_message: Optional[str] = None
 ) -> dict:
-    """Saves a new notebook state as a new version."""
+    """Saves a new notebook state as a new version in SQLite and ChromaDB."""
     version_number = get_next_version_number(session_id)
     created_at = datetime.utcnow().isoformat()
     cells_json = json.dumps(cells)
     
+    # 1. Save structured record to SQLite (used for exact rollback and history queries)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -69,7 +71,30 @@ def save_version(
         )
         conn.commit()
         last_id = cursor.lastrowid
-        
+
+    # 2. Save to ChromaDB (vector store) for semantic search and dashboard visibility
+    chroma_doc_id = f"{session_id}__v{version_number}"
+    chroma_store.store_version(
+        doc_id=chroma_doc_id,
+        session_id=session_id,
+        version_number=version_number,
+        user_intent=user_intent,
+        cells=cells,
+        compiled_script=compiled_script,
+        status=status,
+        created_at=created_at,
+        error_message=error_message
+    )
+    # Also store the user intent in the dedicated intents collection
+    chroma_store.store_user_intent(
+        doc_id=chroma_doc_id,
+        session_id=session_id,
+        version_number=version_number,
+        user_intent=user_intent,
+        cells_modified=list(cells.keys()),
+        created_at=created_at
+    )
+
     return {
         "id": last_id,
         "session_id": session_id,
