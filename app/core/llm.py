@@ -6,7 +6,7 @@ load_dotenv()
 # Architect model for task planning and tutoring
 architect_llm = ChatNVIDIA(
   model="nvidia/nemotron-3-ultra-550b-a55b",
-  api_key="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", 
+  api_key=os.getenv("NVIDIA_API_KEY"), 
   temperature=1,
   top_p=0.95,
   max_tokens=16384,
@@ -17,7 +17,7 @@ architect_llm = ChatNVIDIA(
 # Coder model for parallel code block writing
 coder_llm = ChatNVIDIA(
   model="nvidia/nemotron-3-ultra-550b-a55b",
-  api_key="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", 
+  api_key=os.getenv("NVIDIA_API_KEY"), 
   temperature=1,
   top_p=0.95,
   max_tokens=16384,
