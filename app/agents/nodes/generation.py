@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, Field
 from app.agents.state import NotebookState, CoderState
 from app.core.llm import architect_llm, coder_llm
@@ -29,6 +30,7 @@ def task_splitter_node(state: NotebookState):
     """
     result = structured_llm.invoke(system_prompt)
     subtasks = result.model_dump()
+    print(subtasks)
     problem = subtasks.pop("target_problem")
     return {"target_problem": problem, "subtask_prompts": subtasks}
 
