@@ -91,27 +91,55 @@ class StorageService:
     def update_active_notebook(self, session_id: str, cells: Dict[str, str]) -> str:
         """
         Updates the main 'active.ipynb' file for the session with the given cells.
-        This file acts as the user's live working document (refreshable in Jupyter/editors).
+        This file acts as the user's live working document. It patches existing cells
+        to preserve outputs and manual markdown cells instead of replacing the entire file.
         """
         session_dir = os.path.join(STORAGE_ROOT, f"session_{session_id}")
         os.makedirs(session_dir, exist_ok=True)
         abs_path = os.path.join(session_dir, "active.ipynb")
 
-        nb = new_notebook()
-        ordered_cells = []
-        for cell_name in DEAP_CELLS:
-            code = cells.get(cell_name, "")
-            if code:
-                code_cell = new_code_cell(source=code)
-                code_cell.metadata["cell_name"] = cell_name
-                ordered_cells.append(code_cell)
-        for cell_name, code in cells.items():
-            if cell_name not in DEAP_CELLS and code:
-                code_cell = new_code_cell(source=code)
-                code_cell.metadata["cell_name"] = cell_name
-                ordered_cells.append(code_cell)
+        if os.path.exists(abs_path):
+            with open(abs_path, "r", encoding="utf-8") as f:
+                nb = nbformat.read(f, as_version=4)
+            
+            updated_names = set()
+            for cell in nb.cells:
+                cell_name = cell.metadata.get("cell_name")
+                if cell_name and cell_name in cells:
+                    cell.source = cells[cell_name]
+                    updated_names.add(cell_name)
+                    # Clear outputs so the user knows this cell was modified and needs to be re-run
+                    cell.outputs = []
+                    cell.execution_count = None
+            
+            # Append any missing cells that the backend generated
+            for cell_name in DEAP_CELLS:
+                if cell_name in cells and cell_name not in updated_names and cells[cell_name]:
+                    code_cell = new_code_cell(source=cells[cell_name])
+                    code_cell.metadata["cell_name"] = cell_name
+                    nb.cells.append(code_cell)
+                    
+            for cell_name, code in cells.items():
+                if cell_name not in DEAP_CELLS and cell_name not in updated_names and code:
+                    code_cell = new_code_cell(source=code)
+                    code_cell.metadata["cell_name"] = cell_name
+                    nb.cells.append(code_cell)
+        else:
+            nb = new_notebook()
+            ordered_cells = []
+            for cell_name in DEAP_CELLS:
+                code = cells.get(cell_name, "")
+                if code:
+                    code_cell = new_code_cell(source=code)
+                    code_cell.metadata["cell_name"] = cell_name
+                    ordered_cells.append(code_cell)
+            for cell_name, code in cells.items():
+                if cell_name not in DEAP_CELLS and code:
+                    code_cell = new_code_cell(source=code)
+                    code_cell.metadata["cell_name"] = cell_name
+                    ordered_cells.append(code_cell)
+            nb.cells = ordered_cells
 
-        nb.cells = ordered_cells
         nb.metadata["session_id"] = session_id
 
         with open(abs_path, "w", encoding="utf-8") as f:

@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
-from app.agents.state import NotebookState, CoderState
+from app.agents.state import NotebookState, CoderState, DebugState
 from app.agents.nodes.generation import task_splitter_node, parallel_coder_node, prompt_guardrail_node
 from app.agents.nodes.verification import unit_verifier_node
 
@@ -140,3 +140,43 @@ main_workflow.add_edge("coder_subgraph","orchestrator")
 main_workflow.add_edge("orchestrator",END)
 
 generate_graph = main_workflow.compile()
+
+# --- DEBUG WORKFLOW ---
+def route_debug_start(state: DebugState) -> str:
+    if state.get("traceback_msg"):
+        return "fixer_agent"
+    return END
+
+def prepare_for_verification(state: DebugState):
+    # Concatenate updated cells to verify syntax
+    compiled = "\n".join([code for code in state.get("notebook_cells", {}).values() if code and not code.startswith("# ERROR")])
+    return {"generated_code": compiled, "cell_name": "debug_script", "attempts": state.get("attempts", 0) + 1}
+
+def route_debug_verification(state: DebugState) -> str:
+    if state.get("is_valid"):
+        return END
+    elif state.get("attempts", 0) >= 3:
+        print("Max debug attempts reached.")
+        return END
+    else:
+        return "prepare_fixer_retry"
+
+def prepare_fixer_retry(state: DebugState):
+    return {"traceback_msg": state.get("error_msg", "")}
+
+debug_workflow = StateGraph(DebugState)
+debug_workflow.add_node("fixer_agent", fixer_agent_node)
+debug_workflow.add_node("prepare_for_verification", prepare_for_verification)
+debug_workflow.add_node("unit_verifier", unit_verifier_node)
+debug_workflow.add_node("prepare_fixer_retry", prepare_fixer_retry)
+
+debug_workflow.add_conditional_edges(START, route_debug_start, ["fixer_agent", END])
+debug_workflow.add_edge("fixer_agent", "prepare_for_verification")
+debug_workflow.add_edge("prepare_for_verification", "unit_verifier")
+debug_workflow.add_conditional_edges("unit_verifier", route_debug_verification, {
+    END: END,
+    "prepare_fixer_retry": "prepare_fixer_retry"
+})
+debug_workflow.add_edge("prepare_fixer_retry", "fixer_agent")
+
+debug_graph = debug_workflow.compile()

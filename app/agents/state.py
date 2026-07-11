@@ -33,4 +33,7 @@ class NotebookState(TypedDict):
     is_valid_ea_prompt:bool
     rejection_reason:str
 
-
+class DebugState(NotebookState):
+    is_valid: bool
+    error_msg: str
+    attempts: int
