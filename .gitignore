@@ -22,3 +22,8 @@ __pycache__/
 __pycache__/
 *.pyc
 swark-output
+.DS_Store
+.chroma_version_store
+.agent/
+evo_academy.db
+test_merge.py
