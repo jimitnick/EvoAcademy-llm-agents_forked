@@ -78,6 +78,15 @@ def fixer_agent_node(state: NotebookState):
     if not traceback:
         return state
     
+    session_id = state.get("session_id", "default_session")
+    current_code = state.get("notebook_cells", {})
+    
+    from app.services.chroma_service import ChromaService
+    chroma_svc = ChromaService()
+    chroma_svc.index_active_cells(session_id, current_code)
+    relevant_cells = chroma_svc.get_relevant_cells(session_id, traceback, n_results=3)
+    code_context = relevant_cells if relevant_cells else current_code
+
     fixer_llm = architect_llm.with_structured_output(ModifiedCells)
     system_prompt = f"""
     You are an expert Python debugger specializing in the DEAP Evolutionary Algorithm library.
@@ -85,7 +94,7 @@ def fixer_agent_node(state: NotebookState):
     ===TRACEBACK===
     {traceback}
     ===============
-    Here is their current codebase:{state['notebook_cells']}
+    Here is the relevant codebase context (retrieved semantically):{code_context}
 
     INSTRUCTIONS:
     1.Analyze the traceback to pinpoint the exact cell(s) causing the failure.
@@ -104,6 +113,13 @@ def learner_agent_node(state: NotebookState):
     current_code = state.get("notebook_cells", {})
     session_id = state.get("session_id", "default_session")
     
+    # Use ChromaDB to find the top 3 most relevant cells to the user query
+    from app.services.chroma_service import ChromaService
+    chroma_svc = ChromaService()
+    chroma_svc.index_active_cells(session_id, current_code)
+    relevant_cells = chroma_svc.get_relevant_cells(session_id, user_query, n_results=3)
+    code_context = relevant_cells if relevant_cells else current_code
+
     # Retrieve past student profiles from memory
     memories = []
     try:
@@ -120,7 +136,7 @@ def learner_agent_node(state: NotebookState):
     {memory_context}
     
     The student asked the following question: "{user_query}"
-    Here is the current state of their notebook:{current_code}
+    Here is the relevant context of their notebook (retrieved semantically):{code_context}
     
     INSTRUCTIONS:
     1. Answer their question clearly, concisely, and educationally.

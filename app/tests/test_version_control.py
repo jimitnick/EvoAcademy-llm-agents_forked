@@ -13,7 +13,8 @@ from app.services.version_service import VersionService
 from app.services.storage_service import STORAGE_ROOT
 
 # Use file-based SQLite database for testing so all connections share the same tables/data
-DB_FILE = "./test_version_history.db"
+import uuid
+DB_FILE = f"./test_version_history_{uuid.uuid4().hex[:8]}.db"
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_FILE}"
 
 engine = create_engine(
@@ -39,16 +40,46 @@ class TestVersionControl(unittest.TestCase):
         self.session_id = "test_session_123"
         self.db = TestingSessionLocal()
 
+        # Mock ChromaDB client globally for tests to prevent DB locks / downloads
+        from unittest.mock import MagicMock
+        self.chroma_mock_client = MagicMock()
+        self.chroma_mock_collection = MagicMock()
+        self.chroma_mock_client.get_or_create_collection.return_value = self.chroma_mock_collection
+        self.chroma_mock_client.get_collection.return_value = self.chroma_mock_collection
+        
+        # Configure query default return
+        self.chroma_mock_collection.query.return_value = {
+            "metadatas": [[{"cell_name": "mutation"}]],
+            "documents": [["Cell: mutation\nCode:\ndef mutFlipBit(): pass"]]
+        }
+        self.chroma_mock_collection.count.return_value = 1
+        
+        self.patcher_get_client = patch("app.services.chroma_service._get_client", return_value=self.chroma_mock_client)
+        self.patcher_get_collection = patch("app.services.chroma_service._get_collection", return_value=self.chroma_mock_collection)
+        self.patcher_get_client.start()
+        self.patcher_get_collection.start()
+
+        # Mock _generate_summary globally to prevent network/LLM calls during tests
+        self.patcher_generate_summary = patch(
+            "app.services.version_service._generate_summary",
+            new_callable=AsyncMock,
+            return_value="Mocked summary"
+        )
+        self.patcher_generate_summary.start()
+
     def tearDown(self):
+        # Stop patchers
+        self.patcher_get_client.stop()
+        self.patcher_get_collection.stop()
+        self.patcher_generate_summary.stop()
+
         # Close and clear database
         self.db.close()
-        engine.dispose()  # Releases the file locks on test_version_history.db
-        
-        if os.path.exists(DB_FILE):
-            try:
-                os.remove(DB_FILE)
-            except Exception as e:
-                print(f"Warning: Failed to remove test DB file: {e}")
+        try:
+            Base.metadata.drop_all(bind=engine)
+        except Exception as e:
+            print(f"Warning: Failed to drop test tables: {e}")
+        engine.dispose()
 
         # Clean up files created in STORAGE_ROOT for the test session
         test_session_dir = os.path.join(STORAGE_ROOT, f"session_{self.session_id}")
@@ -460,6 +491,34 @@ class TestVersionControl(unittest.TestCase):
         self.assertEqual(data["query"], "initial")
         self.assertEqual(len(data["results"]), 1)
         self.assertEqual(data["results"][0]["version_number"], 1)
+
+    def test_semantic_code_cell_retrieval(self):
+        """Test ChromaService.index_active_cells and get_relevant_cells."""
+        from app.services.chroma_service import ChromaService
+        chroma_svc = ChromaService()
+        
+        cells = {
+            "imports": "import random\nfrom deap import base, creator, tools, algorithms",
+            "crossover": "def cxTwoPoint(ind1, ind2):\n    return tools.cxTwoPoint(ind1, ind2)",
+            "mutation": "def mutFlipBit(individual, indpb):\n    return tools.mutFlipBit(individual, indpb)"
+        }
+        
+        # Index the cells
+        chroma_svc.index_active_cells(self.session_id, cells)
+        
+        # Search for mutation relevant cells
+        relevant = chroma_svc.get_relevant_cells(self.session_id, "mutation probability", n_results=1)
+        self.assertIn("mutation", relevant)
+        self.assertNotIn("imports", relevant)
+        self.assertIn("mutFlipBit", relevant["mutation"])
+
+    def test_hashing_embedding_function(self):
+        """Test HashingEmbeddingFunction directly."""
+        from app.services.chroma_service import HashingEmbeddingFunction
+        fn = HashingEmbeddingFunction()
+        embeddings = fn(["def mutFlipBit(): pass", "import deap"])
+        self.assertEqual(len(embeddings), 2)
+        self.assertEqual(len(embeddings[0]), 128)
 
 
 if __name__ == "__main__":

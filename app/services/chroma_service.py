@@ -24,6 +24,24 @@ _client = None
 _collection = None
 
 
+class HashingEmbeddingFunction:
+    """A lightweight, zero-dependency embedding function that uses word-hashing."""
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        embeddings = []
+        for text in input:
+            vector = [0.0] * 128
+            words = text.lower().replace("\n", " ").replace("\t", " ").split()
+            for word in words:
+                idx = abs(hash(word)) % 128
+                vector[idx] += 1.0
+            
+            norm = sum(x**2 for x in vector) ** 0.5
+            if norm > 0:
+                vector = [x / norm for x in vector]
+            embeddings.append(vector)
+        return embeddings
+
+
 def _get_collection():
     global _client, _collection
     if _collection is None:
@@ -42,6 +60,13 @@ def _get_collection():
             logger.warning(f"[ChromaDB] Init failed: {e}")
             _collection = None
     return _collection
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        _get_collection()
+    return _client
 
 
 class ChromaService:
@@ -146,3 +171,86 @@ class ChromaService:
             logger.info(f"[ChromaDB] Deleted all versions for session '{session_id}'")
         except Exception as e:
             logger.warning(f"[ChromaDB] Failed to delete session versions: {e}")
+
+        # Also delete active cells collection
+        client = _get_client()
+        if client:
+            try:
+                collection_name = f"active_cells_{session_id}"
+                client.delete_collection(name=collection_name)
+                logger.info(f"[ChromaDB] Deleted active cells collection for session '{session_id}'")
+            except Exception as e:
+                logger.debug(f"[ChromaDB] Failed to delete active cells collection: {e}")
+
+    def index_active_cells(self, session_id: str, cells: dict) -> None:
+        """Indexes the individual cells of the active notebook in ChromaDB for fast retrieval."""
+        client = _get_client()
+        if not client:
+            return
+        
+        try:
+            collection_name = f"active_cells_{session_id}"
+            collection = client.get_or_create_collection(
+                name=collection_name,
+                embedding_function=HashingEmbeddingFunction(),
+                metadata={
+                    "description": "Active notebook cells for semantic query matching",
+                    "hnsw:space": "cosine"
+                }
+            )
+            
+            # Clear existing cells for this session first
+            try:
+                results = collection.get()
+                if results and results.get("ids"):
+                    collection.delete(ids=results["ids"])
+            except Exception as e:
+                logger.debug(f"[ChromaDB] Clear active cells failed: {e}")
+
+            ids = []
+            documents = []
+            metadatas = []
+            
+            if isinstance(cells, dict):
+                for cell_name, code in cells.items():
+                    if code and not code.startswith("# ERROR"):
+                        ids.append(f"{session_id}_{cell_name}")
+                        documents.append(f"Cell: {cell_name}\nCode:\n{code}")
+                        metadatas.append({"session_id": session_id, "cell_name": cell_name})
+            
+            if ids:
+                collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+                logger.info(f"[ChromaDB] Indexed {len(ids)} active cells for session '{session_id}'")
+        except Exception as e:
+            logger.warning(f"[ChromaDB] index_active_cells failed: {e}")
+
+    def get_relevant_cells(self, session_id: str, query: str, n_results: int = 3) -> dict:
+        """Queries the active cells collection and returns the top matching cells."""
+        client = _get_client()
+        if not client:
+            return {}
+            
+        try:
+            collection_name = f"active_cells_{session_id}"
+            collection = client.get_collection(
+                name=collection_name,
+                embedding_function=HashingEmbeddingFunction()
+            )
+            count = collection.count()
+            if count == 0:
+                return {}
+                
+            results = collection.query(
+                query_texts=[query],
+                n_results=min(n_results, count)
+            )
+            relevant_cells = {}
+            if results and results.get("metadatas") and len(results["metadatas"]) > 0:
+                for meta, doc in zip(results["metadatas"][0], results["documents"][0]):
+                    cell_name = meta.get("cell_name")
+                    code = doc.split("Code:\n", 1)[1] if "Code:\n" in doc else doc
+                    relevant_cells[cell_name] = code
+            return relevant_cells
+        except Exception as e:
+            logger.warning(f"[ChromaDB] get_relevant_cells failed: {e}")
+            return {}
