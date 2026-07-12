@@ -1,0 +1,36 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment secrets
+.env
+
+# Git
+.git/
+.gitignore
+
+# IDE / editor
+.vscode/
+.idea/
+.DS_Store
+.agent/
+
+# Runtime data (will be created fresh in container)
+evo_academy.db
+.chroma_version_store/
+storage/
+
+# Misc
+swark-output/
+test_merge.py
+inspect_db.py
+*.png
+implementation_plan.md
+API.md
+README.md

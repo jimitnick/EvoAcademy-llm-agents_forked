@@ -27,3 +27,4 @@ swark-output
 .agent/
 evo_academy.db
 test_merge.py
+storage/*
