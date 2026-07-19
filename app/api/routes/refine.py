@@ -46,8 +46,8 @@ async def refine_notebook(request: RefineRequest, db: Session = Depends(get_db))
         logger.exception(f"[/refine] Failed: {e}")
         try:
             svc = VersionService(db)
-            active_cells = svc.get_active_cells(request.session_id) or {}
-            
+            active_cells_obj = svc.get_active_cells(request.session_id)
+            active_cells = active_cells_obj.to_dict() if active_cells_obj else {}
             notebook = svc.notebook_repo.get_notebook_by_session(request.session_id)
             active_ver_num = 1
             active_ver_id = ""
