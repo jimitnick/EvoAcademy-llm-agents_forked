@@ -82,6 +82,9 @@ class NotebookVersion(Base):
     checksum: Mapped[str] = mapped_column(String, nullable=False)
     chroma_indexed: Mapped[bool] = mapped_column(Boolean, default=False)
     cells_modified: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Delta compression fields
+    is_snapshot: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    delta_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # bytes of delta JSON
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     extra_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
@@ -110,6 +113,8 @@ class NotebookVersion(Base):
             "checksum": self.checksum,
             "cells_modified": self.cells_modified or [],
             "is_active": is_active,
+            "is_snapshot": self.is_snapshot,
+            "delta_size": self.delta_size,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "extra_metadata": self.extra_metadata or {}
         }

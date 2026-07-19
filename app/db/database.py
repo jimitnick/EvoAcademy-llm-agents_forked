@@ -22,10 +22,29 @@ class Base(DeclarativeBase):
     pass
 
 
+def _migrate_add_delta_columns():
+    """
+    Idempotent migration: add delta-compression columns to notebook_versions
+    if they don't already exist.  SQLite does not support IF NOT EXISTS on
+    ALTER TABLE, so we catch the OperationalError.
+    """
+    with engine.connect() as conn:
+        for col_def in [
+            "ALTER TABLE notebook_versions ADD COLUMN is_snapshot BOOLEAN NOT NULL DEFAULT 1",
+            "ALTER TABLE notebook_versions ADD COLUMN delta_size INTEGER",
+        ]:
+            try:
+                conn.execute(__import__("sqlalchemy").text(col_def))
+                conn.commit()
+            except Exception:
+                pass  # Column already exists — safe to ignore
+
+
 def init_db():
-    """Create all tables. Called on app startup."""
+    """Create all tables and apply lightweight migrations. Called on app startup."""
     from app.db import models  # noqa: F401 — import models so Base knows about them
     Base.metadata.create_all(bind=engine)
+    _migrate_add_delta_columns()
 
 
 def get_db():

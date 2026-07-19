@@ -31,6 +31,8 @@ class VersionRepository:
         operation_type: str,
         file_path: str,
         checksum: str,
+        is_snapshot: bool = True,
+        delta_size: Optional[int] = None,
         prompt: Optional[str] = None,
         summary: Optional[str] = None,
         parent_version_id: Optional[str] = None,
@@ -46,12 +48,17 @@ class VersionRepository:
             summary=summary,
             file_path=file_path,
             checksum=checksum,
+            is_snapshot=is_snapshot,
+            delta_size=delta_size,
             cells_modified=cells_modified or [],
             extra_metadata=extra_metadata or {}
         )
         self.db.add(version)
         self.db.flush()
-        logger.info(f"[DB] Created version v{version_number} ({operation_type}) for notebook {notebook_id}")
+        logger.info(
+            f"[DB] Created version v{version_number} ({operation_type}) "
+            f"{'[snapshot]' if is_snapshot else '[delta]'} for notebook {notebook_id}"
+        )
         return version
 
     def get_version_by_id(self, version_id: str) -> Optional[NotebookVersion]:
