@@ -7,9 +7,9 @@ from app.core.llm import architect_llm, coder_llm
 
 logger = logging.getLogger(__name__)
 
-# Limit concurrent LLM calls to avoid NVIDIA API worker exhaustion (503).
-# 12 parallel cells at max_tokens=16384 each will exhaust the 32-worker pool.
-# 4 concurrent calls is a safe ceiling that stays well within limits.
+# Limit concurrent LLM calls to avoid overwhelming the local Ollama server.
+# Running too many parallel requests can exhaust GPU VRAM or CPU resources.
+# Adjust this based on your hardware capability.
 _CODER_SEMAPHORE = asyncio.Semaphore(4)
 
 # Retry config: up to 4 attempts, doubling wait each time (2s, 4s, 8s)

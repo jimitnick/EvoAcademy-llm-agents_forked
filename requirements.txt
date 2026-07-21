@@ -7,7 +7,7 @@ langgraph
 mem0ai
 openai
 chromadb
-langchain-nvidia-ai-endpoints
+langchain-ollama
 sqlalchemy>=2.0
 alembic
 nbformat

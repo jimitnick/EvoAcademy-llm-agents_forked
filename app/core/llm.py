@@ -77,26 +77,30 @@
 
 import os
 from dotenv import load_dotenv
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
+from langchain_ollama import ChatOllama
 
 load_dotenv()
 
+# Ollama base URL — defaults to localhost, configurable via env var
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
+
 # Architect model for task planning and tutoring
-architect_llm = ChatNVIDIA(
-  model="z-ai/glm-5.2",
-  api_key=os.getenv("NVIDIA_API_KEY"), 
-  temperature=1,
-  top_p=0.95,
-  max_tokens=16384,
-  timeout=300,  # Increased timeout
+architect_llm = ChatOllama(
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=1,
+    top_p=0.95,
+    num_predict=16384,     # Ollama equivalent of max_tokens
+    timeout=300,           # Increased timeout for local inference
 )
 
 # Coder model for parallel code block writing
-coder_llm = ChatNVIDIA(
-  model="z-ai/glm-5.2",
-  api_key=os.getenv("NVIDIA_API_KEY"), 
-  temperature=1,
-  top_p=0.95,
-  max_tokens=16384,
-  timeout=300,  # Increased timeout
+coder_llm = ChatOllama(
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=1,
+    top_p=0.95,
+    num_predict=16384,
+    timeout=300,
 )
